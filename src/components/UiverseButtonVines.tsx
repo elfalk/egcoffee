@@ -35,7 +35,7 @@ export const UiverseVines: React.FC = () => (
         style={{
           shapeRendering: 'geometricPrecision',
           textRendering: 'geometricPrecision',
-          imageRendering: 'optimizeQuality',
+          imageRendering: 'auto',
           fillRule: 'evenodd',
           clipRule: 'evenodd',
         }}
@@ -52,7 +52,7 @@ export const UiverseVines: React.FC = () => (
         style={{
           shapeRendering: 'geometricPrecision',
           textRendering: 'geometricPrecision',
-          imageRendering: 'optimizeQuality',
+          imageRendering: 'auto',
           fillRule: 'evenodd',
           clipRule: 'evenodd',
         }}
@@ -69,7 +69,7 @@ export const UiverseVines: React.FC = () => (
         style={{
           shapeRendering: 'geometricPrecision',
           textRendering: 'geometricPrecision',
-          imageRendering: 'optimizeQuality',
+          imageRendering: 'auto',
           fillRule: 'evenodd',
           clipRule: 'evenodd',
         }}

@@ -28,6 +28,7 @@ import {
   OrderRecord,
 } from '../types/coffee';
 import { createOrder, getOrders } from '../services/base44Api';
+import { trackInitiateCheckout, trackConfirmedPurchase } from '../utils/tracking';
 
 interface CheckoutModalProps {
   item: CatalogItem | null;
@@ -184,6 +185,33 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
     createdOrder?.delivery_file_or_url,
     checkLiveOrderStatus,
   ]);
+
+  // Checkout genuinely starts when this modal opens for an item.
+  useEffect(() => {
+    if (!item) return;
+    trackInitiateCheckout({
+      id: item.id,
+      name: item.title_ar || item.title_en || '',
+      price: item.price ?? item.price_egp,
+      currency: item.currency || 'EGP',
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [item?.id]);
+
+  // Purchase is only reported once the order is genuinely confirmed as paid.
+  // Manual-payment order submission alone never fires a Purchase event.
+  useEffect(() => {
+    if (!createdOrder || !item) return;
+    if (createdOrder.payment_status !== 'paid') return;
+    trackConfirmedPurchase({
+      orderNumber: createdOrder.order_number,
+      id: item.id,
+      name: item.title_ar || item.title_en || '',
+      price: (item.price ?? item.price_egp) * Math.max(1, quantity),
+      currency: item.currency || 'EGP',
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [createdOrder?.order_number, createdOrder?.payment_status, item?.id]);
 
   if (!item) return null;
 

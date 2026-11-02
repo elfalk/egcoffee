@@ -21,6 +21,7 @@ import {
 } from 'lucide-react';
 import { Article, ArticleCategory, Language } from '../types/coffee';
 import { SOCIAL_LINKS } from './StaticPages';
+import { applySeo, breadcrumbJsonLd, organizationJsonLd } from '../utils/seo';
 
 interface ArticlesSectionProps {
   categories: ArticleCategory[];
@@ -28,7 +29,11 @@ interface ArticlesSectionProps {
   lang: Language;
   initialSearch?: string;
   initialArticleSlug?: string;
+  initialCategorySlug?: string;
   onClearInitialArticle?: () => void;
+  onOpenArticle?: (article: Article) => void;
+  onOpenCategory?: (category: ArticleCategory) => void;
+  onClearCategory?: () => void;
 }
 
 interface ArticleRatingMap {
@@ -177,7 +182,11 @@ export const ArticlesSection: React.FC<ArticlesSectionProps> = ({
   lang,
   initialSearch = '',
   initialArticleSlug = '',
+  initialCategorySlug = '',
   onClearInitialArticle,
+  onOpenArticle,
+  onOpenCategory,
+  onClearCategory,
 }) => {
   const [selectedCategoryId, setSelectedCategoryId] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState(initialSearch);
@@ -213,18 +222,63 @@ export const ArticlesSection: React.FC<ArticlesSectionProps> = ({
     }
   }, [initialArticleSlug, articles]);
 
+  // Deep-link support: /articles/category/:slug selects the matching category.
+  useEffect(() => {
+    if (!initialCategorySlug || categories.length === 0) return;
+    const target = decodeURIComponent(initialCategorySlug).trim().toLowerCase();
+    const matched = categories.find((c) => {
+      const slug = String(c.slug || '').toLowerCase();
+      const id = String(c.id || '').toLowerCase();
+      const nameEn = String(c.name_en || '').toLowerCase();
+      return slug === target || id === target || nameEn === target;
+    });
+    if (matched) setSelectedCategoryId(matched.id);
+  }, [initialCategorySlug, categories]);
+
+  const selectCategory = (id: string) => {
+    setSelectedCategoryId(id);
+    if (id === 'all') {
+      if (onClearCategory) onClearCategory();
+      try {
+        window.history.replaceState({}, '', '/articles');
+      } catch {
+        // Ignore history API errors
+      }
+      return;
+    }
+    const cat = categories.find((c) => c.id === id);
+    if (cat && onOpenCategory) {
+      onOpenCategory(cat);
+      return;
+    }
+    try {
+      const slug = cat?.slug || cat?.name_en || id;
+      window.history.replaceState(
+        {},
+        '',
+        `/articles/category/${encodeURIComponent(slug)}`
+      );
+    } catch {
+      // Ignore history API errors
+    }
+  };
+
   const getArticleDirectUrl = (article: Article): string => {
     const origin =
       typeof window !== 'undefined' ? window.location.origin : '';
     const slugOrId = encodeURIComponent(article.slug || article.id);
-    return `${origin}/?article=${slugOrId}`;
+    return `${origin}/articles/${slugOrId}`;
   };
 
   const handleOpenArticle = (article: Article) => {
     setReadingArticle(article);
+    if (onOpenArticle) {
+      onOpenArticle(article);
+      return;
+    }
     try {
       const slugOrId = encodeURIComponent(article.slug || article.id);
-      window.history.replaceState({}, '', `/?article=${slugOrId}`);
+      window.history.pushState({}, '', `/articles/${slugOrId}`);
     } catch {
       // Ignore history API errors in restricted frames
     }
@@ -234,13 +288,75 @@ export const ArticlesSection: React.FC<ArticlesSectionProps> = ({
     setReadingArticle(null);
     if (onClearInitialArticle) onClearInitialArticle();
     try {
-      const url = new URL(window.location.href);
-      url.searchParams.delete('article');
-      window.history.replaceState({}, '', url.pathname + url.search);
+      window.history.replaceState({}, '', '/articles');
     } catch {
       // Ignore history API errors
     }
   };
+
+  // Article-level SEO + structured data while reading an article.
+  useEffect(() => {
+    if (!readingArticle) return;
+    const isAr = lang === 'ar';
+    const title =
+      (isAr
+        ? readingArticle.title_ar || readingArticle.title_en
+        : readingArticle.title_en || readingArticle.title_ar) || '';
+    const rawDescription = isAr
+      ? readingArticle.summary_ar ||
+        readingArticle.excerpt_ar ||
+        readingArticle.content_ar
+      : readingArticle.excerpt_en ||
+        readingArticle.summary_ar ||
+        readingArticle.content_en;
+    const description =
+      (Array.isArray(rawDescription)
+        ? rawDescription.join(' ')
+        : rawDescription) || title;
+    const slug = readingArticle.slug || readingArticle.id;
+    const path = `/articles/${encodeURIComponent(slug)}`;
+    const image = readingArticle.cover_image || undefined;
+    const author =
+      (isAr ? readingArticle.author_ar : readingArticle.author_en) ||
+      (isAr ? 'القهوة المصرية' : 'Egyptian Coffee Trade');
+    const published = readingArticle.publish_date || undefined;
+    const modified = published;
+
+    const articleLd: Record<string, unknown> = {
+      '@context': 'https://schema.org',
+      '@type': 'Article',
+      headline: title,
+      description: String(description).slice(0, 300),
+      mainEntityOfPage: { '@type': 'WebPage', '@id': `https://www.egcoffee.pro${path}` },
+      author: { '@type': 'Person', name: author },
+      publisher: {
+        '@type': 'Organization',
+        name: isAr ? 'القهوة المصرية' : 'Egyptian Coffee Trade',
+      },
+      inLanguage: isAr ? 'ar' : 'en',
+    };
+    if (image) articleLd.image = image;
+    if (published) articleLd.datePublished = published;
+    if (modified) articleLd.dateModified = modified;
+
+    applySeo({
+      title: `${title} | ${isAr ? 'القهوة المصرية' : 'Egyptian Coffee Trade'}`,
+      description: String(description),
+      path,
+      image,
+      type: 'article',
+      locale: lang,
+      jsonLd: [
+        articleLd,
+        breadcrumbJsonLd([
+          { name: isAr ? 'الرئيسية' : 'Home', path: '/' },
+          { name: isAr ? 'المقالات' : 'Articles', path: '/articles' },
+          { name: title, path },
+        ]),
+        organizationJsonLd(),
+      ],
+    });
+  }, [readingArticle, lang]);
 
   const handleCopyArticleLink = (article: Article, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
@@ -598,7 +714,7 @@ export const ArticlesSection: React.FC<ArticlesSectionProps> = ({
           <div className="flex flex-wrap items-center gap-3">
             <button
               type="button"
-              onClick={() => setSelectedCategoryId('all')}
+              onClick={() => selectCategory('all')}
               className={`text-xs ${
                 selectedCategoryId === 'all' ? 'chip-pill-active' : 'chip-pill'
               }`}
@@ -666,7 +782,7 @@ export const ArticlesSection: React.FC<ArticlesSectionProps> = ({
         <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
-            onClick={() => setSelectedCategoryId('all')}
+            onClick={() => selectCategory('all')}
             className={`text-xs shrink-0 ${
               selectedCategoryId === 'all' ? 'chip-pill-active' : 'chip-pill'
             }`}
@@ -684,7 +800,7 @@ export const ArticlesSection: React.FC<ArticlesSectionProps> = ({
                 key={cat.id}
                 type="button"
                 onClick={() =>
-                  setSelectedCategoryId(isSelected ? 'all' : cat.id)
+                  selectCategory(isSelected ? 'all' : cat.id)
                 }
                 className={`text-xs shrink-0 ${
                   isSelected ? 'chip-pill-active' : 'chip-pill'
@@ -742,7 +858,7 @@ export const ArticlesSection: React.FC<ArticlesSectionProps> = ({
 
               <button
                 type="button"
-                onClick={() => setSelectedCategoryId('all')}
+                onClick={() => selectCategory('all')}
                 className="modal-close-btn text-xs self-start sm:self-center shrink-0"
               >
                 <X size={16} strokeWidth={2.4} />
@@ -772,7 +888,7 @@ export const ArticlesSection: React.FC<ArticlesSectionProps> = ({
             {selectedCategoryId !== 'all' && (
               <button
                 type="button"
-                onClick={() => setSelectedCategoryId('all')}
+                onClick={() => selectCategory('all')}
                 className="btn-primary text-xs px-5 py-2.5"
               >
                 {lang === 'ar'
@@ -937,7 +1053,7 @@ export const ArticlesSection: React.FC<ArticlesSectionProps> = ({
               <button
                 type="button"
                 onClick={() => {
-                  setSelectedCategoryId('all');
+                  selectCategory('all');
                   document
                     .getElementById('articles')
                     ?.scrollIntoView({ behavior: 'smooth' });
@@ -1001,7 +1117,7 @@ export const ArticlesSection: React.FC<ArticlesSectionProps> = ({
                     key={cat.id}
                     type="button"
                     onClick={() => {
-                      setSelectedCategoryId(isSelected ? 'all' : cat.id);
+                      selectCategory(isSelected ? 'all' : cat.id);
                       document
                         .getElementById('articles')
                         ?.scrollIntoView({ behavior: 'smooth' });
@@ -1110,7 +1226,7 @@ export const ArticlesSection: React.FC<ArticlesSectionProps> = ({
                       key={cat.id}
                       type="button"
                       onClick={() => {
-                        setSelectedCategoryId(isSelected ? 'all' : cat.id);
+                        selectCategory(isSelected ? 'all' : cat.id);
                         document
                           .getElementById('articles')
                           ?.scrollIntoView({ behavior: 'smooth' });

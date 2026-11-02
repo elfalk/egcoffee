@@ -12,11 +12,13 @@ import {
 } from 'lucide-react';
 import { CatalogItem, Language } from '../types/coffee';
 import { getOptimizedCoverSources } from '../utils/imageOptimization';
+import { productPath } from '../router';
 
 interface StoreSectionProps {
   catalogItems: CatalogItem[];
   lang: Language;
   onBuyItem: (item: CatalogItem) => void;
+  onOpenProduct?: (item: CatalogItem) => void;
 }
 
 type StoreFilter = 'all' | 'books' | 'courses' | 'other';
@@ -25,6 +27,7 @@ export const StoreSection: React.FC<StoreSectionProps> = ({
   catalogItems,
   lang,
   onBuyItem,
+  onOpenProduct,
 }) => {
   const [filter, setFilter] = useState<StoreFilter>('all');
   const [subCategory, setSubCategory] = useState<string>('all');
@@ -442,6 +445,18 @@ export const StoreSection: React.FC<StoreSectionProps> = ({
                         ) : null}
                       </div>
                     </div>
+
+                    <a
+                      href={productPath(item)}
+                      onClick={(e) => {
+                        if (!onOpenProduct) return;
+                        e.preventDefault();
+                        onOpenProduct(item);
+                      }}
+                      className="block text-center text-xs font-medium text-[var(--accent)] underline-offset-4 hover:underline"
+                    >
+                      {lang === 'ar' ? 'عرض التفاصيل الكاملة' : 'View full details'}
+                    </a>
 
                     <button
                       type="button"

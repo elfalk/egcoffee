@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import { CatalogItem, Language } from '../types/coffee';
 import { getOptimizedCoverSources } from '../utils/imageOptimization';
+import { productPath } from '../router';
 
 interface BookCoverflowProps {
   books: CatalogItem[];
@@ -17,6 +18,7 @@ interface BookCoverflowProps {
   lang: Language;
   onBuyItem: (item: CatalogItem) => void;
   onOpenStore?: () => void;
+  onOpenProduct?: (item: CatalogItem) => void;
 }
 
 export interface CoverflowCarouselProps {
@@ -280,6 +282,7 @@ export const BookCoverflow: React.FC<BookCoverflowProps> = ({
   lang,
   onBuyItem,
   onOpenStore,
+  onOpenProduct,
 }) => {
   const allDisplayItems = bundleItem ? [...books, bundleItem] : books;
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -395,7 +398,17 @@ export const BookCoverflow: React.FC<BookCoverflowProps> = ({
                     </div>
 
                     <h3 className="font-display text-xl sm:text-2xl font-semibold text-[var(--text)]">
-                      {lang === 'ar' ? activeItem.title_ar : activeItem.title_en}
+                      <a
+                        href={productPath(activeItem)}
+                        onClick={(e) => {
+                          if (!onOpenProduct) return;
+                          e.preventDefault();
+                          onOpenProduct(activeItem);
+                        }}
+                        className="hover:text-[var(--accent)] transition-colors"
+                      >
+                        {lang === 'ar' ? activeItem.title_ar : activeItem.title_en}
+                      </a>
                     </h3>
 
                     <p className="text-sm sm:text-base text-[var(--muted)]">
@@ -446,7 +459,18 @@ export const BookCoverflow: React.FC<BookCoverflowProps> = ({
                   </div>
 
                   {activeItem.price_egp > 0 && (
-                    <div className="shrink-0">
+                    <div className="shrink-0 space-y-2">
+                      <a
+                        href={productPath(activeItem)}
+                        onClick={(e) => {
+                          if (!onOpenProduct) return;
+                          e.preventDefault();
+                          onOpenProduct(activeItem);
+                        }}
+                        className="block text-center text-xs font-medium text-[var(--accent)] underline-offset-4 hover:underline"
+                      >
+                        {lang === 'ar' ? 'عرض تفاصيل الكتاب' : 'View book details'}
+                      </a>
                       <button
                         type="button"
                         onClick={() => onBuyItem(activeItem)}

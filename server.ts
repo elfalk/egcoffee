@@ -3,7 +3,6 @@ import express from 'express';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI, Type } from '@google/genai';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -20,11 +19,11 @@ function getAiClient(): GoogleGenAI {
   });
 }
 
-// Official Telegram Bot (@wepegcoffeebot) & Admin Chat ID configuration
-const DEFAULT_TELEGRAM_BOT_TOKEN =
-  '9209854209:AAEILtr1kHGKET8uL6LC1h5UDkrR-k7eHgI';
+// Official Telegram Bot (@wepegcoffeebot) & Admin Chat ID configuration.
+// Credentials are supplied through server-side environment variables only.
+const DEFAULT_TELEGRAM_BOT_TOKEN = '';
 const DEFAULT_TELEGRAM_BOT_USERNAME = 'wepegcoffeebot';
-const DEFAULT_TELEGRAM_CHAT_ID = '8993280027';
+const DEFAULT_TELEGRAM_CHAT_ID = (process.env.TELEGRAM_CHAT_ID || '').trim();
 const SUBSCRIBERS_FILE = path.join(__dirname, '.telegram-subscribers.json');
 const ORDERS_STORE_FILE = path.join(__dirname, '.orders-store.json');
 const CUSTOMERS_STORE_FILE = path.join(__dirname, '.customers-store.json');
@@ -189,11 +188,14 @@ function getNormalizedBase44ApiUrl(): string {
   return raw.endsWith('/api') ? raw : `${raw}/api`;
 }
 
-const DEFAULT_BASE44_API_TOKEN =
-  'b44u_ae2f813da8007b3074e076a91a93cc1552e148cbee11c1bbb2f0387fd8259bcc';
+const DEFAULT_BASE44_API_TOKEN = '';
 
 function getBase44AuthHeaders(): Record<string, string> {
-  const token = (process.env.VITE_BASE44_API_TOKEN || '').trim();
+  const token = (
+    process.env.BASE44_API_TOKEN ||
+    process.env.VITE_BASE44_API_TOKEN ||
+    ''
+  ).trim();
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   };
@@ -207,6 +209,512 @@ function getBase44AuthHeaders(): Record<string, string> {
     ? effectiveToken
     : `Bearer ${effectiveToken}`;
   return headers;
+}
+
+// ---------------------------------------------------------------------------
+// Server-side SEO (sitemap, robots, crawler metadata injection)
+// ---------------------------------------------------------------------------
+const SEO_SITE_ORIGIN = 'https://www.egcoffee.pro';
+
+function escapeHtml(value: string): string {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function serverSlugify(input: string): string {
+  return String(input || '')
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[\s_]+/g, '-')
+    .replace(/[^\p{L}\p{N}-]+/gu, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 90);
+}
+
+function shortRecordId(id: string): string {
+  const clean = String(id || '').replace(/[^a-zA-Z0-9]/g, '');
+  return clean.slice(-8) || 'item';
+}
+
+function productSlugOf(item: any): string {
+  const base = serverSlugify(item?.title_en || item?.title_ar || 'product');
+  return `${base || 'product'}-${shortRecordId(item?.id)}`;
+}
+
+function productSectionOf(item: any): 'store' | 'library' | 'courses' {
+  const type = String(item?.item_type || item?.type || '').toLowerCase();
+  if (type === 'book' || type === 'bundle') return 'library';
+  if (type === 'course') return 'courses';
+  return 'store';
+}
+
+function productPathOf(item: any): string {
+  return `/${productSectionOf(item)}/${productSlugOf(item)}`;
+}
+
+function articleSlugOf(article: any): string {
+  return String(article?.slug || article?.id || '').trim();
+}
+
+function articlePathOf(article: any): string {
+  return `/articles/${encodeURIComponent(articleSlugOf(article))}`;
+}
+
+function categorySlugOf(category: any): string {
+  return String(
+    category?.slug ||
+      serverSlugify(category?.name_en || category?.name_ar) ||
+      category?.id
+  );
+}
+
+function categoryPathOf(category: any): string {
+  return `/articles/category/${encodeURIComponent(categorySlugOf(category))}`;
+}
+
+interface SeoCacheEntry {
+  at: number;
+  data: any[];
+}
+
+const seoEntityCache = new Map<string, SeoCacheEntry>();
+const SEO_CACHE_TTL = 60_000;
+
+async function fetchBase44List(entity: string, query = ''): Promise<any[]> {
+  const cached = seoEntityCache.get(entity);
+  if (cached && Date.now() - cached.at < SEO_CACHE_TTL) return cached.data;
+  try {
+    const baseUrl = getNormalizedBase44ApiUrl();
+    const response = await fetch(
+      `${baseUrl}/entities/${entity}${query ? `?${query}` : ''}`,
+      { method: 'GET', headers: getBase44AuthHeaders() }
+    );
+    if (!response.ok) return cached?.data || [];
+    const data = await response.json();
+    const list = Array.isArray(data)
+      ? data
+      : Array.isArray(data?.data)
+      ? data.data
+      : Array.isArray(data?.items)
+      ? data.items
+      : [];
+    seoEntityCache.set(entity, { at: Date.now(), data: list });
+    return list;
+  } catch {
+    return cached?.data || [];
+  }
+}
+
+function isoDate(value: any): string | undefined {
+  if (!value) return undefined;
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return undefined;
+  return d.toISOString().slice(0, 10);
+}
+
+async function buildSitemapXml(): Promise<string> {
+  const [catalog, articles, categories] = await Promise.all([
+    fetchBase44List('CatalogItem', 'limit=500'),
+    fetchBase44List('Article', 'limit=500'),
+    fetchBase44List('ArticleCategory', 'limit=200'),
+  ]);
+
+  const urls: { loc: string; lastmod?: string; changefreq?: string; priority?: string }[] = [];
+  const push = (loc: string, lastmod?: string, changefreq = 'weekly', priority = '0.7') =>
+    urls.push({ loc, lastmod, changefreq, priority });
+
+  push('/', undefined, 'daily', '1.0');
+  push('/store', undefined, 'weekly', '0.9');
+  push('/library', undefined, 'weekly', '0.9');
+  push('/courses', undefined, 'weekly', '0.9');
+  push('/beans', undefined, 'weekly', '0.8');
+  push('/blends', undefined, 'weekly', '0.8');
+  push('/calculator', undefined, 'monthly', '0.7');
+  push('/calculator/blend', undefined, 'monthly', '0.7');
+  push('/calculator/coffee-cost', undefined, 'monthly', '0.7');
+  push('/articles', undefined, 'daily', '0.9');
+  push('/about', undefined, 'monthly', '0.5');
+  push('/privacy', undefined, 'yearly', '0.3');
+
+  for (const item of catalog) {
+    if (!item || !item.id) continue;
+    push(
+      productPathOf(item),
+      isoDate(item.updated_date || item.created_date),
+      'weekly',
+      '0.8'
+    );
+  }
+
+  for (const article of articles) {
+    const status = String(article?.status || '').toLowerCase();
+    if (status && status !== 'published') continue;
+    if (!article?.id) continue;
+    push(
+      articlePathOf(article),
+      isoDate(article.publish_date || article.updated_date || article.created_date),
+      'monthly',
+      '0.7'
+    );
+  }
+
+  for (const category of categories) {
+    if (!category?.id) continue;
+    push(categoryPathOf(category), undefined, 'weekly', '0.6');
+  }
+
+  // De-duplicate by loc, keeping the first occurrence.
+  const seen = new Set<string>();
+  const unique = urls.filter((u) => {
+    if (seen.has(u.loc)) return false;
+    seen.add(u.loc);
+    return true;
+  });
+
+  const body = unique
+    .map((u) => {
+      const parts = [`    <loc>${escapeHtml(`${SEO_SITE_ORIGIN}${u.loc}`)}</loc>`];
+      if (u.lastmod) parts.push(`    <lastmod>${u.lastmod}</lastmod>`);
+      if (u.changefreq) parts.push(`    <changefreq>${u.changefreq}</changefreq>`);
+      if (u.priority) parts.push(`    <priority>${u.priority}</priority>`);
+      return `  <url>\n${parts.join('\n')}\n  </url>`;
+    })
+    .join('\n');
+
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${body}\n</urlset>\n`;
+}
+
+function buildRobotsTxt(): string {
+  return [
+    'User-agent: *',
+    'Allow: /',
+    'Disallow: /orders',
+    'Disallow: /api/',
+    'Disallow: /admin',
+    'Disallow: /*?article=',
+    '',
+    `Sitemap: ${SEO_SITE_ORIGIN}/sitemap.xml`,
+    '',
+  ].join('\n');
+}
+
+interface RouteSeoMeta {
+  title: string;
+  description: string;
+  path: string;
+  image?: string;
+  type?: string;
+  noindex?: boolean;
+  status?: number;
+  jsonLd?: Record<string, unknown> | Record<string, unknown>[];
+}
+
+const STATIC_PAGE_SEO: Record<string, RouteSeoMeta> = {
+  '/': {
+    title: 'القهوة المصرية | تجارة وتحميص وتدريب القهوة',
+    description:
+      'منصة القهوة المصرية: أسعار البن الخضراء والمحمصة، موسوعة البن والتوليفات، الكتب السبعة، الدورات، المقالات وأدوات الحساب.',
+    path: '/',
+  },
+  '/store': {
+    title: 'المتجر | القهوة المصرية',
+    description:
+      'تصفح الكتب الرقمية، الحزم، الدورات، أنظمة نقاط البيع وبرامج الأعمال من القهوة المصرية.',
+    path: '/store',
+  },
+  '/library': {
+    title: 'الكتب السبعة | القهوة المصرية',
+    description:
+      'مكتبة القهوة المصرية الرقمية: سبعة كتب متخصصة في تجارة وتحميص وتقييم القهوة.',
+    path: '/library',
+  },
+  '/courses': {
+    title: 'الدورات | القهوة المصرية',
+    description:
+      'دورات تدريبية متخصصة في القهوة: التحضير، التحميص، التقييم وإدارة الأعمال.',
+    path: '/courses',
+  },
+  '/beans': {
+    title: 'موسوعة البن | القهوة المصرية',
+    description: 'موسوعة أنواع البن وأصوله وخصائصه الحسية من القهوة المصرية.',
+    path: '/beans',
+  },
+  '/blends': {
+    title: 'التوليفات | القهوة المصرية',
+    description: 'توليفات القهوة المصرية ونسبها وطرق تحضيرها.',
+    path: '/blends',
+  },
+  '/calculator': {
+    title: 'حاسبة التوليفات | القهوة المصرية',
+    description: 'احسب نسب توليف القهوة وتكلفتها باستخدام أدوات القهوة المصرية.',
+    path: '/calculator',
+  },
+  '/calculator/blend': {
+    title: 'حاسبة توليف القهوة | القهوة المصرية',
+    description:
+      'احسب نسب مكونات توليفة القهوة وتكلفة الكيلو المحمص الصافي بعد خصم فاقد التحميص.',
+    path: '/calculator/blend',
+  },
+  '/calculator/coffee-cost': {
+    title: 'حاسبة تكلفة القهوة | القهوة المصرية',
+    description:
+      'احسب التكلفة الفعلية لكيلو القهوة المحمص الصافي، وفاقد التحميص، والوزن الأخضر المطلوب.',
+    path: '/calculator/coffee-cost',
+  },
+  '/articles': {
+    title: 'المقالات والدراسات | القهوة المصرية',
+    description: 'دراسات ومقالات متخصصة في تجارة القهوة وتحميصها وتقييمها.',
+    path: '/articles',
+  },
+  '/about': {
+    title: 'من نحن | القهوة المصرية',
+    description: 'تعرّف على القهوة المصرية: قصتنا، رسالتنا وخدماتنا في عالم القهوة.',
+    path: '/about',
+  },
+  '/privacy': {
+    title: 'الخصوصية والشروط | القهوة المصرية',
+    description: 'سياسة الخصوصية وشروط الاستخدام لموقع القهوة المصرية.',
+    path: '/privacy',
+  },
+};
+
+function organizationJsonLdServer() {
+  return {
+    '@context': 'https://schema.org',
+    '@type': 'Organization',
+    name: 'القهوة المصرية',
+    alternateName: 'Egyptian Coffee Trade',
+    url: SEO_SITE_ORIGIN,
+    logo: `${SEO_SITE_ORIGIN}/media/logo-96w.webp`,
+  };
+}
+
+async function resolveRouteSeo(pathname: string): Promise<RouteSeoMeta> {
+  const clean = pathname.replace(/\/+$/, '') || '/';
+  const segments = clean.split('/').filter(Boolean).map(decodeURIComponent);
+
+  // Backwards-compatible aliases for older shared links.
+  const aliasMap: Record<string, string> = { products: 'store', shop: 'store', books: 'library' };
+  if (segments[0] && aliasMap[segments[0]]) segments[0] = aliasMap[segments[0]];
+
+  if (segments[0] === 'orders') {
+    return {
+      title: 'طلباتي | القهوة المصرية',
+      description: 'متابعة طلباتك وحالة الدفع والتوصيل.',
+      path: '/orders',
+      noindex: true,
+    };
+  }
+
+  if (segments[0] === 'store' || segments[0] === 'library' || segments[0] === 'courses') {
+    if (segments[1]) {
+      const catalog = await fetchBase44List('CatalogItem', 'limit=500');
+      const target = segments[1].toLowerCase();
+      const item = catalog.find(
+        (p) =>
+          String(p?.id || '').toLowerCase() === target ||
+          productSlugOf(p).toLowerCase() === target
+      );
+      if (item) {
+        const title = item.title_ar || item.title_en || 'منتج';
+        const description =
+          item.description_ar ||
+          item.description_en ||
+          item.subtitle_ar ||
+          item.subtitle_en ||
+          title;
+        const price = Number(item.price_egp ?? item.price ?? 0);
+        const type = String(item.item_type || item.type || '').toLowerCase();
+        const schemaType =
+          type === 'book' || type === 'bundle'
+            ? 'Book'
+            : type === 'course'
+            ? 'Course'
+            : 'Product';
+        const ld: Record<string, unknown> = {
+          '@context': 'https://schema.org',
+          '@type': schemaType,
+          name: title,
+          description: String(description).slice(0, 300),
+          url: `${SEO_SITE_ORIGIN}${productPathOf(item)}`,
+        };
+        if (item.cover_image) ld.image = item.cover_image;
+        if (price > 0) {
+          ld.offers = {
+            '@type': 'Offer',
+            price: String(price),
+            priceCurrency: item.currency || 'EGP',
+            availability: 'https://schema.org/InStock',
+            url: `${SEO_SITE_ORIGIN}${productPathOf(item)}`,
+          };
+        }
+        return {
+          title: `${title} | القهوة المصرية`,
+          description: String(description),
+          path: productPathOf(item),
+          image: item.cover_image || undefined,
+          type: 'product',
+          jsonLd: [ld, organizationJsonLdServer()],
+        };
+      }
+    }
+    return STATIC_PAGE_SEO[`/${segments[0]}`] || STATIC_PAGE_SEO['/'];
+  }
+
+  if (segments[0] === 'articles') {
+    if (segments[1] === 'category' && segments[2]) {
+      const categories = await fetchBase44List('ArticleCategory', 'limit=200');
+      const target = segments[2].toLowerCase();
+      const cat = categories.find(
+        (c) =>
+          String(c?.id || '').toLowerCase() === target ||
+          categorySlugOf(c).toLowerCase() === target
+      );
+      if (cat) {
+        const name = cat.name_ar || cat.name_en || 'مقالات';
+        return {
+          title: `${name} | القهوة المصرية`,
+          description:
+            cat.description_ar ||
+            cat.description_en ||
+            `مقالات ودراسات في تصنيف ${name}.`,
+          path: categoryPathOf(cat),
+        };
+      }
+    } else if (segments[1]) {
+      const articles = await fetchBase44List('Article', 'limit=500');
+      const target = segments[1].toLowerCase();
+      const article = articles.find(
+        (a) =>
+          String(a?.id || '').toLowerCase() === target ||
+          String(a?.slug || '').toLowerCase() === target
+      );
+      if (article) {
+        const title = article.title_ar || article.title_en || 'مقال';
+        const rawDescription =
+          article.summary_ar ||
+          article.excerpt_ar ||
+          article.content_ar ||
+          article.excerpt_en ||
+          title;
+        const description = Array.isArray(rawDescription)
+          ? rawDescription.join(' ')
+          : rawDescription;
+        const ld: Record<string, unknown> = {
+          '@context': 'https://schema.org',
+          '@type': 'Article',
+          headline: title,
+          description: String(description).slice(0, 300),
+          mainEntityOfPage: {
+            '@type': 'WebPage',
+            '@id': `${SEO_SITE_ORIGIN}${articlePathOf(article)}`,
+          },
+          author: {
+            '@type': 'Person',
+            name: article.author_ar || article.author_en || 'القهوة المصرية',
+          },
+          publisher: {
+            '@type': 'Organization',
+            name: 'القهوة المصرية',
+          },
+          inLanguage: 'ar',
+        };
+        if (article.cover_image) ld.image = article.cover_image;
+        if (article.publish_date) ld.datePublished = article.publish_date;
+        return {
+          title: `${title} | القهوة المصرية`,
+          description: String(description),
+          path: articlePathOf(article),
+          image: article.cover_image || undefined,
+          type: 'article',
+          jsonLd: [ld, organizationJsonLdServer()],
+        };
+      }
+    }
+    return STATIC_PAGE_SEO['/articles'];
+  }
+
+  if (segments[0] === 'calculator') {
+    if (segments[1] === 'blend') return STATIC_PAGE_SEO['/calculator/blend'];
+    if (segments[1] === 'coffee-cost' || segments[1] === 'cost')
+      return STATIC_PAGE_SEO['/calculator/coffee-cost'];
+    return STATIC_PAGE_SEO['/calculator'];
+  }
+
+  return STATIC_PAGE_SEO[`/${segments[0] || ''}`] || {
+    title: 'الصفحة غير موجودة | القهوة المصرية',
+    description: 'الصفحة المطلوبة غير موجودة.',
+    path: '/',
+    noindex: true,
+    status: 404,
+  };
+}
+
+function renderHtmlWithSeo(template: string, meta: RouteSeoMeta): string {
+  const title = escapeHtml(meta.title);
+  const description = escapeHtml(meta.description.slice(0, 300));
+  const url = escapeHtml(`${SEO_SITE_ORIGIN}${meta.path}`);
+  const image = escapeHtml(
+    meta.image
+      ? /^https?:\/\//i.test(meta.image)
+        ? meta.image
+        : `${SEO_SITE_ORIGIN}${meta.image.startsWith('/') ? '' : '/'}${meta.image}`
+      : `${SEO_SITE_ORIGIN}/media/gates-poster.webp`
+  );
+  const type = meta.type || 'website';
+
+  let html = template;
+  html = html.replace(/<title>[\s\S]*?<\/title>/i, `<title>${title}</title>`);
+
+  const stripTag = (pattern: RegExp) => {
+    html = html.replace(pattern, '');
+  };
+  stripTag(/<meta\s+name="description"[^>]*>/gi);
+  stripTag(/<link\s+rel="canonical"[^>]*>/gi);
+  stripTag(/<meta\s+property="og:(title|description|url|image|type|site_name|locale)"[^>]*>/gi);
+  stripTag(/<meta\s+name="twitter:(card|title|description|image)"[^>]*>/gi);
+  stripTag(/<meta\s+name="robots"[^>]*>/gi);
+
+  const jsonLd = meta.jsonLd
+    ? Array.isArray(meta.jsonLd)
+      ? meta.jsonLd
+      : [meta.jsonLd]
+    : [];
+
+  const headTags = [
+    `<meta name="description" content="${description}" />`,
+    `<link rel="canonical" href="${url}" />`,
+    meta.noindex
+      ? '<meta name="robots" content="noindex, nofollow" />'
+      : '<meta name="robots" content="index, follow" />',
+    `<meta property="og:type" content="${escapeHtml(type)}" />`,
+    `<meta property="og:title" content="${title}" />`,
+    `<meta property="og:description" content="${description}" />`,
+    `<meta property="og:url" content="${url}" />`,
+    `<meta property="og:image" content="${image}" />`,
+    `<meta property="og:site_name" content="القهوة المصرية" />`,
+    `<meta property="og:locale" content="ar_EG" />`,
+    `<meta name="twitter:card" content="summary_large_image" />`,
+    `<meta name="twitter:title" content="${title}" />`,
+    `<meta name="twitter:description" content="${description}" />`,
+    `<meta name="twitter:image" content="${image}" />`,
+    ...jsonLd.map(
+      (ld) =>
+        `<script type="application/ld+json">${JSON.stringify(ld).replace(
+          /</g,
+          '\\u003c'
+        )}</script>`
+    ),
+  ].join('\n    ');
+
+  html = html.replace(/<\/head>/i, `    ${headTags}\n  </head>`);
+  return html;
 }
 
 function extractDeliveryUrl(raw: any): string {
@@ -426,7 +934,7 @@ function getActiveTelegramBotToken(): string {
   )
     .trim()
     .replace(/^["']|["']$/g, '');
-  if (!envToken || envToken.startsWith('8922960077:')) {
+  if (!envToken) {
     return DEFAULT_TELEGRAM_BOT_TOKEN;
   }
   return envToken;
@@ -1203,7 +1711,7 @@ function parseOrderFilterFromReq(req: express.Request): OrderFilterContext {
   return { query, clientId, customerId, authToken, orderNumbers };
 }
 
-async function startServer() {
+export async function createApp() {
   const app = express();
   const PORT = 3000;
 
@@ -1755,25 +2263,85 @@ Respond strictly in JSON matching the schema in ${lang === 'ar' ? 'professional 
     }
   });
 
+  // Dynamic sitemap generated from published Base44 content.
+  app.get('/sitemap.xml', async (_req, res) => {
+    try {
+      const xml = await buildSitemapXml();
+      res.setHeader('Content-Type', 'application/xml; charset=utf-8');
+      res.setHeader('Cache-Control', 'public, max-age=3600');
+      res.status(200).send(xml);
+    } catch (err: any) {
+      res.status(500).send('<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"></urlset>');
+    }
+  });
+
+  // robots.txt — public pages allowed, private/order/API routes excluded.
+  app.get('/robots.txt', (_req, res) => {
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.status(200).send(buildRobotsTxt());
+  });
+
+  // Legacy article links: /?article=slug -> permanent redirect to /articles/slug
+  app.get('/', (req, res, next) => {
+    const legacy = req.query.article;
+    if (typeof legacy === 'string' && legacy.trim()) {
+      res.redirect(301, `/articles/${encodeURIComponent(legacy.trim())}`);
+      return;
+    }
+    next();
+  });
+
   if (process.env.NODE_ENV !== 'production') {
+    // Loaded lazily so production/serverless bundles never pull in Vite.
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(__dirname, 'dist');
-    app.use(express.static(distPath));
-    app.get('*', (_req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
+    const distCandidates = [
+      path.join(process.cwd(), 'dist'),
+      path.join(__dirname, 'dist'),
+      path.join(__dirname, '..', 'dist'),
+    ];
+    const distPath =
+      distCandidates.find((p) =>
+        fs.existsSync(path.join(p, 'index.html'))
+      ) || distCandidates[0];
+    // index:false so the SEO-injecting handler below controls the HTML document.
+    app.use(express.static(distPath, { index: false }));
+    app.get('*', async (req, res) => {
+      if (req.path.startsWith('/api/')) {
+        res.status(404).json({ error: 'API route not found' });
+        return;
+      }
+      try {
+        const template = await fs.promises.readFile(
+          path.join(distPath, 'index.html'),
+          'utf8'
+        );
+        const meta = await resolveRouteSeo(req.path);
+        res.setHeader('Content-Type', 'text/html; charset=utf-8');
+        res.status(meta.status || 200).send(renderHtmlWithSeo(template, meta));
+      } catch {
+        res.sendFile(path.join(distPath, 'index.html'));
+      }
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(
-      `Egyptian Coffee Trade server running on http://localhost:${PORT}`
-    );
-  });
+  return app;
 }
 
-startServer();
+// Local / long-running runtime entry point. On Vercel the app is exported via
+// `api/index.ts` and invoked as a serverless handler instead.
+if (process.env.VERCEL !== '1') {
+  createApp().then((app) => {
+    const PORT = 3000;
+    app.listen(PORT, '0.0.0.0', () => {
+      console.log(
+        `Egyptian Coffee Trade server running on http://localhost:${PORT}`
+      );
+    });
+  });
+}

@@ -360,3 +360,21 @@ export interface AIBlendAnalysisResult {
   flavorOptimizationTips: string[];
   costOptimizationTips: string[];
 }
+
+/**
+ * Matches the EXISTING Base44 `Ad` entity (do not create a Banner entity).
+ * GET /entities/Ad
+ */
+export interface AdRecord {
+  id: string;
+  title_ar: string;
+  subtitle_ar?: string;
+  image_url?: string;
+  link_url?: string;
+  cta_label?: string;
+  is_active: boolean;
+  sort_order: number;
+  created_date?: string;
+  updated_date?: string;
+  created_by_id?: string;
+}
