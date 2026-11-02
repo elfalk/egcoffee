@@ -31,7 +31,7 @@ export const BlendsEncyclopedia: React.FC<BlendsEncyclopediaProps> = ({
       if (!q) return true;
       return (
         bl.name_ar.toLowerCase().includes(q) ||
-        bl.name_en.toLowerCase().includes(q) ||
+        (bl.name_en || '').toLowerCase().includes(q) ||
         bl.flavor_profile_ar.toLowerCase().includes(q) ||
         bl.code.toLowerCase().includes(q)
       );

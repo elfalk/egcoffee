@@ -13,6 +13,7 @@ import {
   CalculatorComponentItem,
   AIBlendAnalysisResult,
   BlendIngredient,
+  AdRecord,
 } from '../types/coffee';
 
 const CLIENT_SESSION_KEY = 'egc_client_session_id_v2';
@@ -67,12 +68,11 @@ export function addSavedCustomerOrderNumber(orderNumber: string): void {
 const REGISTERED_CUSTOMERS_KEY = 'egc_registered_customers_v2';
 const LOCAL_ORDERS_CACHE_KEY = 'egc_customer_orders_cache_v2';
 const TG_LAST_UPDATE_KEY = 'egc_tg_last_update_id_v2';
-const DEFAULT_TG_BOT_TOKEN =
-  (import.meta.env.VITE_TELEGRAM_BOT_TOKEN as string | undefined)?.trim() ||
-  '9209854209:AAEILtr1kHGKET8uL6LC1h5UDkrR-k7eHgI';
-const DEFAULT_TG_CHAT_ID =
-  (import.meta.env.VITE_TELEGRAM_CHAT_ID as string | undefined)?.trim() ||
-  '8993280027';
+// Telegram bot credentials are server-side only. The browser never receives
+// them: all notifications go through the existing `/api/notify-telegram`
+// endpoint (server.ts / Vercel function).
+const DEFAULT_TG_BOT_TOKEN = '';
+const DEFAULT_TG_CHAT_ID = '';
 
 interface LocalCustomerRecord {
   id: string;
@@ -507,12 +507,15 @@ function isUsableToken(rawToken?: string): boolean {
   return /^[\x20-\x7E]+$/.test(t);
 }
 
-const DEFAULT_BASE44_TOKEN =
-  'b44u_ae2f813da8007b3074e076a91a93cc1552e148cbee11c1bbb2f0387fd8259bcc';
+const DEFAULT_BASE44_TOKEN = '';
 
 export const BASE44_CONFIG = {
   baseUrl: normalizeBase44Url(import.meta.env.VITE_BASE44_API_URL),
   appId: import.meta.env.VITE_BASE44_APP_ID || '6ae1356b20aa9cddb1240b85',
+  // Never embed a Base44 token in the browser bundle. When a token is
+  // explicitly supplied through VITE_BASE44_API_TOKEN it is treated as a
+  // deliberately public client credential; otherwise all requests go through
+  // the server-side proxy, which holds the private token.
   token: isUsableToken(import.meta.env.VITE_BASE44_API_TOKEN)
     ? String(import.meta.env.VITE_BASE44_API_TOKEN).trim()
     : DEFAULT_BASE44_TOKEN,
@@ -553,43 +556,9 @@ async function fetchBase44Raw<T>(
   options?: FetchQueryOptions
 ): Promise<T[]> {
   const qs = buildQueryString(options);
-  const directUrl = `${BASE44_CONFIG.baseUrl}/entities/${entityName}${qs}`;
 
-  // 1. Direct request to Base44 API (https://egcoffee.base44.app/api/entities/...)
-  try {
-    let response = await fetch(directUrl, {
-      method: 'GET',
-      headers: getBase44ClientHeaders(true),
-    });
-
-    if (!response.ok && BASE44_CONFIG.token) {
-      response = await fetch(directUrl, {
-        method: 'GET',
-        headers: getBase44ClientHeaders(false),
-      });
-    }
-
-    if (response.ok) {
-      const parsed = await safeParseJsonResponse(response);
-      if (parsed.isJson && parsed.data) {
-        const json = parsed.data;
-        const items = Array.isArray(json)
-          ? json
-          : Array.isArray(json?.data)
-          ? json.data
-          : Array.isArray(json?.items)
-          ? json.items
-          : null;
-        if (items) {
-          return items as T[];
-        }
-      }
-    }
-  } catch {
-    // Fallback to server proxy
-  }
-
-  // 2. Server-side proxy fallback (/api/base44/entities/...)
+  // 1. Server-side proxy first (/api/base44/entities/...). This keeps the
+  //    Base44 credential on the server and works on Vercel serverless.
   try {
     const proxyRes = await fetch(`/api/base44/entities/${entityName}${qs}`);
     if (proxyRes.ok) {
@@ -603,11 +572,42 @@ async function fetchBase44Raw<T>(
           : Array.isArray(json?.items)
           ? json.items
           : [];
-        return items as T[];
+        if (Array.isArray(items) && items.length > 0) {
+          return items as T[];
+        }
+        // An empty array is a valid response; return it directly.
+        if (Array.isArray(items)) return items as T[];
       }
     }
   } catch {
-    // Return empty list if unreachable
+    // Fall through to direct request when a public token is configured
+  }
+
+  // 2. Direct request only when an explicitly public client token exists.
+  if (BASE44_CONFIG.token) {
+    const directUrl = `${BASE44_CONFIG.baseUrl}/entities/${entityName}${qs}`;
+    try {
+      const response = await fetch(directUrl, {
+        method: 'GET',
+        headers: getBase44ClientHeaders(true),
+      });
+      if (response.ok) {
+        const parsed = await safeParseJsonResponse(response);
+        if (parsed.isJson && parsed.data) {
+          const json = parsed.data;
+          const items = Array.isArray(json)
+            ? json
+            : Array.isArray(json?.data)
+            ? json.data
+            : Array.isArray(json?.items)
+            ? json.items
+            : null;
+          if (items) return items as T[];
+        }
+      }
+    } catch {
+      // Return empty list if unreachable
+    }
   }
 
   return [];
@@ -1353,6 +1353,40 @@ export async function getArticleCategories(): Promise<ArticleCategory[]> {
     sort_order: Number(c.sort_order ?? idx + 1),
     article_count: Number(c.article_count ?? 0),
   }));
+}
+
+/**
+ * Reads advertisements from the EXISTING Base44 `Ad` entity.
+ * Only active ads are returned, ordered by `sort_order` ascending.
+ * Field mapping: title_ar, subtitle_ar, image_url, link_url, cta_label.
+ */
+export async function getActiveAds(): Promise<AdRecord[]> {
+  try {
+    const live = await fetchBase44Raw<any>('Ad', {
+      limit: 50,
+      sort_by: 'sort_order',
+    });
+    if (!Array.isArray(live)) return [];
+    return live
+      .filter((raw) => raw && raw.is_active === true)
+      .map((raw, idx): AdRecord => ({
+        id: String(raw.id || `ad-${idx + 1}`),
+        title_ar: String(raw.title_ar || '').trim(),
+        subtitle_ar: raw.subtitle_ar ? String(raw.subtitle_ar).trim() : '',
+        image_url: raw.image_url ? String(raw.image_url).trim() : '',
+        link_url: raw.link_url ? String(raw.link_url).trim() : '',
+        cta_label: raw.cta_label ? String(raw.cta_label).trim() : '',
+        is_active: true,
+        sort_order: Number(raw.sort_order ?? idx + 1),
+        created_date: raw.created_date,
+        updated_date: raw.updated_date,
+        created_by_id: raw.created_by_id,
+      }))
+      .sort((a, b) => a.sort_order - b.sort_order);
+  } catch {
+    // A failing ad feed must never break the rest of the page.
+    return [];
+  }
 }
 
 export async function getArticles(): Promise<Article[]> {

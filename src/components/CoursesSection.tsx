@@ -2,17 +2,20 @@ import React from 'react';
 import { motion } from 'motion/react';
 import { BookOpen, Calendar, ArrowUpLeft, ArrowUpRight } from 'lucide-react';
 import { CatalogItem, Language } from '../types/coffee';
+import { productPath } from '../router';
 
 interface CoursesSectionProps {
   courses: CatalogItem[];
   lang: Language;
   onBuyCourse: (course: CatalogItem) => void;
+  onOpenCourse?: (course: CatalogItem) => void;
 }
 
 export const CoursesSection: React.FC<CoursesSectionProps> = ({
   courses,
   lang,
   onBuyCourse,
+  onOpenCourse,
 }) => {
   const ArrowIcon = lang === 'ar' ? ArrowUpLeft : ArrowUpRight;
 
@@ -81,7 +84,17 @@ export const CoursesSection: React.FC<CoursesSectionProps> = ({
                     />
                   )}
                   <h3 className="font-display text-xl font-semibold text-[var(--text)]">
-                    {lang === 'ar' ? course.title_ar : course.title_en}
+                    <a
+                      href={productPath(course)}
+                      onClick={(e) => {
+                        if (!onOpenCourse) return;
+                        e.preventDefault();
+                        onOpenCourse(course);
+                      }}
+                      className="hover:text-[var(--accent)] transition-colors"
+                    >
+                      {lang === 'ar' ? course.title_ar : course.title_en}
+                    </a>
                   </h3>
 
                   <p className="text-xs sm:text-sm text-[var(--muted)]">

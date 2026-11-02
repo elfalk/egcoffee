@@ -29,6 +29,7 @@ import {
   OrderRecord,
   CustomerAccount,
   AudioClip,
+  AdRecord,
 } from './types/coffee';
 import {
   getCoffeePrices,
@@ -39,10 +40,24 @@ import {
   getArticles,
   getOrders,
   getAudioClips,
+  getActiveAds,
   resolveAudioClipUrl,
   getStoredCustomerAuth,
   logoutCustomerAccount,
 } from './services/base44Api';
+import {
+  parseRoute,
+  Route,
+  routeToTab,
+  tabToPath,
+  findProductBySlug,
+  productPath,
+  canonicalUrl,
+} from './router';
+import { applySeo, breadcrumbJsonLd, organizationJsonLd } from './utils/seo';
+import { resetViewContentDedupe } from './utils/tracking';
+import { AdsBanner } from './components/AdsBanner';
+import { ProductDetailPage } from './components/ProductDetailPage';
 import { SearchBar } from './components/SearchBar';
 import { BookCoverflow } from './components/BookCoverflow';
 import { BlendCalculator } from './components/BlendCalculator';
@@ -244,21 +259,27 @@ function GatesNav({
 export default function App() {
   useGlobalUiverseButtons();
   const [lang, setLang] = useState<Language>('ar');
+  const [route, setRoute] = useState<Route>(() => {
+    if (typeof window === 'undefined') return { name: 'home' };
+    return parseRoute(window.location.pathname, window.location.search);
+  });
   const [activeTab, setActiveTab] = useState<NavTab>(() => {
-    if (typeof window !== 'undefined') {
-      const params = new URLSearchParams(window.location.search);
-      if (params.get('article')) return 'articles';
-    }
-    return 'home';
+    if (typeof window === 'undefined') return 'home';
+    return routeToTab(parseRoute(window.location.pathname, window.location.search));
   });
   const [globalSearchQuery, setGlobalSearchQuery] = useState<string>('');
   const [selectedArticleSlug, setSelectedArticleSlug] = useState<string>(() => {
-    if (typeof window !== 'undefined') {
-      const params = new URLSearchParams(window.location.search);
-      return params.get('article') || '';
-    }
-    return '';
+    if (typeof window === 'undefined') return '';
+    const r = parseRoute(window.location.pathname, window.location.search);
+    return r.name === 'articles' ? r.articleSlug || '' : '';
   });
+  const [selectedCategorySlug, setSelectedCategorySlug] = useState<string>(() => {
+    if (typeof window === 'undefined') return '';
+    const r = parseRoute(window.location.pathname, window.location.search);
+    return r.name === 'articles' ? r.categorySlug || '' : '';
+  });
+  const [ads, setAds] = useState<AdRecord[]>([]);
+  const [catalogLoaded, setCatalogLoaded] = useState(false);
 
   const [prices, setPrices] = useState<CoffeePrice[]>([]);
   const [catalogItems, setCatalogItems] = useState<CatalogItem[]>([]);
@@ -448,6 +469,7 @@ export default function App() {
           getArticles(),
         ]);
       setCatalogItems(catalogData);
+      setCatalogLoaded(true);
       setBeans(beansData);
       setBlends(blendsData);
       setCategories(catsData);
@@ -456,13 +478,15 @@ export default function App() {
       // Phase 2: Below-the-fold / secondary data after initial render
       setTimeout(async () => {
         try {
-          const [pricesData, ordersData, audioData] = await Promise.all([
+          const [pricesData, ordersData, audioData, adsData] = await Promise.all([
             getCoffeePrices(),
             getOrders(),
             getAudioClips(),
+            getActiveAds(),
           ]);
           setPrices(pricesData);
           setOrders(ordersData);
+          setAds(adsData);
           if (audioData.length > 0) {
             setAudioClips(audioData);
             setCurrentTrackIndex((prev) => (prev < audioData.length ? prev : 0));
@@ -490,29 +514,239 @@ export default function App() {
     (item) => (item.item_type || item.type) === 'course'
   );
 
+  // Keep UI state in sync with real URLs (back/forward, direct links, refresh).
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    // Migrate legacy `/?article=slug` links to the canonical article path.
+    const params = new URLSearchParams(window.location.search);
+    const legacyArticle = params.get('article');
+    if (legacyArticle) {
+      const target = `/articles/${encodeURIComponent(legacyArticle)}`;
+      window.history.replaceState({}, '', target);
+      const migrated = parseRoute(target, '');
+      setRoute(migrated);
+      setActiveTab(routeToTab(migrated));
+      setSelectedArticleSlug(legacyArticle);
+      return;
+    }
+
+    const onPopState = () => {
+      const next = parseRoute(window.location.pathname, window.location.search);
+      setRoute(next);
+      setActiveTab(routeToTab(next));
+      setSelectedArticleSlug(next.name === 'articles' ? next.articleSlug || '' : '');
+      setSelectedCategorySlug(next.name === 'articles' ? next.categorySlug || '' : '');
+      resetViewContentDedupe();
+      window.scrollTo({ top: 0 });
+    };
+
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
+
+  // Route-level SEO for every public page. Product pages set their own
+  // metadata (including Product/Book/Course/SoftwareApplication JSON-LD) inside
+  // ProductDetailPage, so they are skipped here.
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (route.name === 'product') return;
+
+    const org = organizationJsonLd();
+    const isAr = lang === 'ar';
+
+    const page = (() => {
+      switch (route.name) {
+        case 'home':
+          return {
+            title: isAr
+              ? 'القهوة المصرية | تجارة وتحميص وتدريب القهوة'
+              : 'Egyptian Coffee Trade | Coffee, Roasting & Training',
+            description: isAr
+              ? 'منصة القهوة المصرية: أسعار البن الخضراء والمحمصة، موسوعة البن والتوليفات، الكتب السبعة، الدورات، المقالات وأدوات الحساب.'
+              : 'Egyptian Coffee Trade: green and roasted coffee prices, bean and blend encyclopedia, the seven books, courses, research articles and calculators.',
+            path: '/',
+            jsonLd: org,
+          };
+        case 'store':
+          return {
+            title: isAr ? 'المتجر | القهوة المصرية' : 'Store | Egyptian Coffee Trade',
+            description: isAr
+              ? 'تصفح الكتب الرقمية، الحزم، الدورات، أنظمة نقاط البيع وبرامج الأعمال من القهوة المصرية.'
+              : 'Browse digital books, bundles, courses, POS systems and business software from Egyptian Coffee Trade.',
+            path: '/store',
+            jsonLd: org,
+          };
+        case 'library':
+          return {
+            title: isAr ? 'الكتب السبعة | القهوة المصرية' : 'The Seven Books | Egyptian Coffee Trade',
+            description: isAr
+              ? 'مكتبة القهوة المصرية الرقمية: سبعة كتب متخصصة في تجارة وتحميص وتقييم القهوة.'
+              : 'The Egyptian Coffee Trade digital library: seven specialized books on coffee trade, roasting and cupping.',
+            path: '/library',
+            jsonLd: org,
+          };
+        case 'courses':
+          return {
+            title: isAr ? 'الدورات | القهوة المصرية' : 'Courses | Egyptian Coffee Trade',
+            description: isAr
+              ? 'دورات تدريبية متخصصة في القهوة: التحضير، التحميص، التقييم وإدارة الأعمال.'
+              : 'Specialized coffee training courses: brewing, roasting, cupping and business management.',
+            path: '/courses',
+            jsonLd: org,
+          };
+        case 'beans':
+          return {
+            title: isAr ? 'موسوعة البن | القهوة المصرية' : 'Bean Origins | Egyptian Coffee Trade',
+            description: isAr
+              ? 'موسوعة أنواع البن وأصوله وخصائصه الحسية من القهوة المصرية.'
+              : 'An encyclopedia of coffee bean origins and sensory profiles from Egyptian Coffee Trade.',
+            path: '/beans',
+            jsonLd: org,
+          };
+        case 'blends':
+          return {
+            title: isAr ? 'التوليفات | القهوة المصرية' : 'Blends | Egyptian Coffee Trade',
+            description: isAr
+              ? 'توليفات القهوة المصرية ونسبها وطرق تحضيرها.'
+              : 'Egyptian coffee blends, their ratios and preparation methods.',
+            path: '/blends',
+            jsonLd: org,
+          };
+        case 'calculator': {
+          const isCost = route.tool === 'coffee-cost';
+          const isBlend = route.tool === 'blend';
+          return {
+            title: isAr
+              ? isCost
+                ? 'حاسبة تكلفة القهوة | القهوة المصرية'
+                : isBlend
+                  ? 'حاسبة توليف القهوة | القهوة المصرية'
+                  : 'حاسبة التوليفات | القهوة المصرية'
+              : isCost
+                ? 'Coffee Cost Calculator | Egyptian Coffee Trade'
+                : isBlend
+                  ? 'Blend Calculator | Egyptian Coffee Trade'
+                  : 'Coffee Calculators | Egyptian Coffee Trade',
+            description: isAr
+              ? isCost
+                ? 'احسب التكلفة الفعلية لكيلو القهوة المحمص الصافي، وفاقد التحميص، والوزن الأخضر المطلوب.'
+                : isBlend
+                  ? 'احسب نسب مكونات توليفة القهوة وتكلفة الكيلو المحمص الصافي بعد خصم فاقد التحميص.'
+                  : 'احسب نسب توليف القهوة وتكلفتها باستخدام أدوات القهوة المصرية.'
+              : isCost
+                ? 'Calculate the real cost per kg of roasted coffee, roast loss and required green weight.'
+                : isBlend
+                  ? 'Calculate coffee blend ratios and the net roasted cost per kg after roast loss.'
+                  : 'Calculate coffee blend ratios and cost with Egyptian Coffee Trade tools.',
+            path: route.tool ? `/calculator/${route.tool}` : '/calculator',
+            jsonLd: org,
+          };
+        }
+        case 'articles':
+          return {
+            title: isAr ? 'المقالات والدراسات | القهوة المصرية' : 'Research & Articles | Egyptian Coffee Trade',
+            description: isAr
+              ? 'دراسات ومقالات متخصصة في تجارة القهوة وتحميصها وتقييمها.'
+              : 'Specialized studies and articles on coffee trade, roasting and cupping.',
+            path: route.articleSlug
+              ? `/articles/${encodeURIComponent(route.articleSlug)}`
+              : route.categorySlug
+              ? `/articles/category/${encodeURIComponent(route.categorySlug)}`
+              : '/articles',
+            jsonLd: org,
+          };
+        case 'orders':
+          return {
+            title: isAr ? 'طلباتي | القهوة المصرية' : 'My Orders | Egyptian Coffee Trade',
+            description: isAr
+              ? 'متابعة طلباتك وحالة الدفع والتوصيل.'
+              : 'Track your orders, payment and delivery status.',
+            path: '/orders',
+            noindex: true,
+            jsonLd: org,
+          };
+        case 'about':
+          return {
+            title: isAr ? 'من نحن | القهوة المصرية' : 'About Us | Egyptian Coffee Trade',
+            description: isAr
+              ? 'تعرّف على القهوة المصرية: قصتنا، رسالتنا وخدماتنا في عالم القهوة.'
+              : 'Learn about Egyptian Coffee Trade: our story, mission and coffee services.',
+            path: '/about',
+            jsonLd: org,
+          };
+        case 'privacy':
+          return {
+            title: isAr ? 'الخصوصية والشروط | القهوة المصرية' : 'Privacy & Terms | Egyptian Coffee Trade',
+            description: isAr
+              ? 'سياسة الخصوصية وشروط الاستخدام لموقع القهوة المصرية.'
+              : 'Privacy policy and terms of use for Egyptian Coffee Trade.',
+            path: '/privacy',
+            jsonLd: org,
+          };
+        case 'not-found':
+          return {
+            title: isAr ? 'الصفحة غير موجودة | القهوة المصرية' : 'Page not found | Egyptian Coffee Trade',
+            description: isAr
+              ? 'الصفحة المطلوبة غير موجودة.'
+              : 'The requested page was not found.',
+            path: '/',
+            noindex: true,
+            jsonLd: org,
+          };
+        default:
+          return null;
+      }
+    })();
+
+    if (!page) return;
+    applySeo({
+      title: page.title,
+      description: page.description,
+      path: page.path,
+      type: 'website',
+      noindex: page.noindex,
+      jsonLd: page.jsonLd,
+      locale: lang,
+    });
+  }, [route, lang]);
+
+  const navigateToPath = useCallback((path: string, replace = false) => {
+    const clean = path.startsWith('/') ? path : `/${path}`;
+    try {
+      if (replace) window.history.replaceState({}, '', clean);
+      else window.history.pushState({}, '', clean);
+    } catch {
+      // Ignore history API errors in restricted frames
+    }
+    const next = parseRoute(clean, '');
+    setRoute(next);
+    setActiveTab(routeToTab(next));
+    setSelectedArticleSlug(next.name === 'articles' ? next.articleSlug || '' : '');
+    setSelectedCategorySlug(next.name === 'articles' ? next.categorySlug || '' : '');
+    resetViewContentDedupe();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }, []);
+
   const handleNavigate = (tab: NavTab, query = '') => {
     setGlobalSearchQuery(query);
     if (tab !== 'articles') {
       setSelectedArticleSlug('');
+      setSelectedCategorySlug('');
     }
-    setActiveTab(tab);
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+    navigateToPath(tabToPath(tab));
   };
 
   const handleOpenArticleDirect = (article: Article) => {
     const slugOrId = article.slug || article.id;
     setSelectedArticleSlug(slugOrId);
-    setActiveTab('articles');
-    try {
-      window.history.replaceState(
-        {},
-        '',
-        `/?article=${encodeURIComponent(slugOrId)}`
-      );
-    } catch {
-      // Ignore history API errors
-    }
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+    navigateToPath(`/articles/${encodeURIComponent(slugOrId)}`);
+  };
+
+  const handleOpenArticleCategory = (category: ArticleCategory) => {
+    const slug = category.slug || category.id;
+    setSelectedCategorySlug(slug);
+    navigateToPath(`/articles/category/${encodeURIComponent(slug)}`);
   };
 
   const handleLoadBlendIntoCalculator = (blend: CoffeeBlend) => {
@@ -550,7 +784,7 @@ export default function App() {
 
       {/* Main Content Area */}
       <main className="flex-1 w-full max-w-[100vw] overflow-x-hidden">
-        {activeTab === 'home' && (
+        {route.name === 'home' && (
           <>
             {/* GATES 5SDESIGN FULLSCREEN HERO */}
             <section
@@ -1000,14 +1234,75 @@ export default function App() {
 
             {/* LIVE COFFEE MARKET EXCHANGE TICKER BELOW THE LAST SECTION */}
             <MarketTicker prices={prices} beans={beans} lang={lang} />
+
+            {/* ACTIVE ADVERTISING BANNERS (Base44 `Ad` entity, is_active only) */}
+            <AdsBanner ads={ads} lang={lang} onNavigate={navigateToPath} />
           </>
         )}
 
-        {activeTab === 'store' && (
+        {/* PRODUCT DETAIL PAGE — independent, shareable URL per product */}
+        {route.name === 'product' &&
+          (() => {
+            const product = findProductBySlug(catalogItems, route.slug);
+            if (!product) {
+              return (
+                <section className="mx-auto max-w-2xl px-6 py-24 text-center">
+                  <p className="text-sm font-medium text-[var(--accent)]">404</p>
+                  <h1 className="mt-3 text-2xl font-semibold text-[var(--text)]">
+                    {lang === 'ar' ? 'المنتج غير موجود' : 'Product not found'}
+                  </h1>
+                  <p className="mt-3 text-sm text-[var(--muted)]">
+                    {lang === 'ar'
+                      ? 'ربما تم حذف هذا المنتج أو تغيّر رابطه. يمكنك تصفح المتجر.'
+                      : 'This product may have been removed or its link changed. Browse the store instead.'}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => navigateToPath(`/${route.section}`)}
+                    className="mt-6 inline-flex items-center gap-2 rounded-full bg-[var(--accent)] px-5 py-2.5 text-sm font-semibold text-white"
+                  >
+                    {lang === 'ar' ? 'العودة إلى المتجر' : 'Back to store'}
+                  </button>
+                </section>
+              );
+            }
+            return (
+              <ProductDetailPage
+                item={product}
+                lang={lang}
+                onBack={() => navigateToPath(`/${route.section}`)}
+                onBuy={(item) => setCheckoutItem(item)}
+              />
+            );
+          })()}
+
+        {route.name === 'not-found' && (
+          <section className="mx-auto max-w-2xl px-6 py-24 text-center">
+            <p className="text-sm font-medium text-[var(--accent)]">404</p>
+            <h1 className="mt-3 text-2xl font-semibold text-[var(--text)]">
+              {lang === 'ar' ? 'الصفحة غير موجودة' : 'Page not found'}
+            </h1>
+            <p className="mt-3 text-sm text-[var(--muted)]">
+              {lang === 'ar'
+                ? 'الرابط الذي طلبته غير متاح. يمكنك العودة إلى الصفحة الرئيسية.'
+                : 'The link you requested is unavailable. You can return to the homepage.'}
+            </p>
+            <button
+              type="button"
+              onClick={() => navigateToPath('/')}
+              className="mt-6 inline-flex items-center gap-2 rounded-full bg-[var(--accent)] px-5 py-2.5 text-sm font-semibold text-white"
+            >
+              {lang === 'ar' ? 'الصفحة الرئيسية' : 'Homepage'}
+            </button>
+          </section>
+        )}
+
+        {route.name !== 'product' && activeTab === 'store' && (
           <StoreSection
             catalogItems={catalogItems}
             lang={lang}
             onBuyItem={(item) => setCheckoutItem(item)}
+            onOpenProduct={(item) => navigateToPath(productPath(item))}
           />
         )}
 
@@ -1020,13 +1315,14 @@ export default function App() {
           />
         )}
 
-        {activeTab === 'library' && (
+        {route.name !== 'product' && activeTab === 'library' && (
           <BookCoverflow
             books={books}
             bundleItem={bundleItem}
             lang={lang}
             onBuyItem={(item) => setCheckoutItem(item)}
             onOpenStore={() => handleNavigate('store')}
+            onOpenProduct={(item) => navigateToPath(productPath(item))}
           />
         )}
 
@@ -1054,15 +1350,20 @@ export default function App() {
             lang={lang}
             initialSearch={globalSearchQuery}
             initialArticleSlug={selectedArticleSlug}
+            initialCategorySlug={selectedCategorySlug}
             onClearInitialArticle={() => setSelectedArticleSlug('')}
+            onOpenArticle={handleOpenArticleDirect}
+            onOpenCategory={handleOpenArticleCategory}
+            onClearCategory={() => setSelectedCategorySlug('')}
           />
         )}
 
-        {activeTab === 'courses' && (
+        {route.name !== 'product' && activeTab === 'courses' && (
           <CoursesSection
             courses={courses}
             lang={lang}
             onBuyCourse={(course) => setCheckoutItem(course)}
+            onOpenCourse={(course) => navigateToPath(productPath(course))}
           />
         )}
 
