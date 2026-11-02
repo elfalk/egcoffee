@@ -5,8 +5,24 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI, Type } from '@google/genai';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+/**
+ * Resolve the module directory in both module systems.
+ *
+ * On Vercel the Express app is bundled to CommonJS, where `import.meta.url` is
+ * empty, so `fileURLToPath` would throw at module load (FUNCTION_INVOCATION_FAILED).
+ * Fall back to `process.cwd()` (the deployment root, where `dist/` is included).
+ */
+function resolveModuleDirname(): string {
+  try {
+    const metaUrl = (import.meta as { url?: string } | undefined)?.url;
+    if (metaUrl) return path.dirname(fileURLToPath(metaUrl));
+  } catch {
+    // `import.meta` unavailable (CommonJS bundle) — fall through.
+  }
+  return process.cwd();
+}
+
+const __dirname = resolveModuleDirname();
 
 function getAiClient(): GoogleGenAI {
   return new GoogleGenAI({
@@ -24,9 +40,14 @@ function getAiClient(): GoogleGenAI {
 const DEFAULT_TELEGRAM_BOT_TOKEN = '';
 const DEFAULT_TELEGRAM_BOT_USERNAME = 'wepegcoffeebot';
 const DEFAULT_TELEGRAM_CHAT_ID = (process.env.TELEGRAM_CHAT_ID || '').trim();
-const SUBSCRIBERS_FILE = path.join(__dirname, '.telegram-subscribers.json');
-const ORDERS_STORE_FILE = path.join(__dirname, '.orders-store.json');
-const CUSTOMERS_STORE_FILE = path.join(__dirname, '.customers-store.json');
+// Runtime fallback stores. Vercel's deployment directory is read-only, so on
+// Vercel these live in /tmp (the only writable path). Base44 remains the source
+// of truth for orders/customers; these files are only a local cache.
+const RUNTIME_STORE_DIR =
+  process.env.VERCEL === '1' ? '/tmp' : __dirname;
+const SUBSCRIBERS_FILE = path.join(RUNTIME_STORE_DIR, '.telegram-subscribers.json');
+const ORDERS_STORE_FILE = path.join(RUNTIME_STORE_DIR, '.orders-store.json');
+const CUSTOMERS_STORE_FILE = path.join(RUNTIME_STORE_DIR, '.customers-store.json');
 
 interface TelegramSubscriberStore {
   chatIds: (string | number)[];
