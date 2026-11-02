@@ -1,15 +1,16 @@
 {
-  "version": 2,
-  "buildCommand": "npm run build",
-  "functions": {
-    "api/index.ts": {
-      "includeFiles": "dist/**",
-      "memory": 1024,
-      "maxDuration": 30
+  "rewrites": [
+    {
+      "source": "/sitemap.xml",
+      "destination": "/api/index?sitemap=1"
+    },
+    {
+      "source": "/api/(.*)",
+      "destination": "/api/index"
+    },
+    {
+      "source": "/((?!api/|media/|assets/|robots\\.txt|sitemap\\.xml|favicon\\.ico).*)",
+      "destination": "/index.html"
     }
-  },
-  "routes": [
-    { "handle": "filesystem" },
-    { "src": "/(.*)", "dest": "/api/index" }
   ]
 }

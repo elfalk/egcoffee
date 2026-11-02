@@ -6,6 +6,10 @@ import {defineConfig} from 'vite';
 export default defineConfig(() => {
   return {
     plugins: [react(), tailwindcss()],
+    define: {
+      'import.meta.env.VITE_BASE44_API_TOKEN': JSON.stringify(''),
+      'import.meta.env.VITE_TELEGRAM_BOT_TOKEN': JSON.stringify(''),
+    },
     resolve: {
       alias: {
         '@': path.resolve(__dirname, '.'),
